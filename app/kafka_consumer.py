@@ -18,37 +18,25 @@ def create_consumer():
 # Kafka message consumption logic
 def consume_messages():
     consumer = create_consumer()
-    consumer.subscribe([settings.KAFKA_TOPIC])
-
     try:
+        consumer.subscribe([settings.KAFKA_TOPIC])
         while True:
-            msg = consumer.poll(timeout=1.0)
+            msg = consumer.poll(1.0)
             if msg is None:
-                continue  # No message available
+                continue
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
-                    continue
+                    logging.info(f"End of partition reached {msg.topic()}[{msg.partition()}]")
                 else:
-                    raise KafkaException(msg.error())
-
-            message_value = msg.value().decode('utf-8')
-            logging.info(f"Message received: {message_value}")
+                    logging.error(f"Kafka error: {msg.error()}")
+                continue
             try:
-                data = json.loads(message_value)
-                content_id = data.get("content_id")
-                score = data.get("score")
-
-                # Update or create a new score entry in the database
-                if content_id is not None and score is not None:
-                    Score.objects.update_or_create(
-                        content_id=content_id,
-                        defaults={'score': score},
-                    )
-                else:
-                    logging.error("Invalid data received from Kafka")
+                # Process the message
+                payload = json.loads(msg.value().decode('utf-8'))
+                Score.objects.create(**payload)
             except IntegrityError as e:
-                logging.error(f"Database integrity error: {e}")
-            except Exception as e:
-                logging.error(f"Error processing message: {e}")
+                logging.error(f"Database error: {e}")
+    except KafkaException as e:
+        logging.error(f"Kafka exception: {e}")
     finally:
         consumer.close()
