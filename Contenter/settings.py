@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 DEBUG = os.getenv("DEBUG", "False") == "True"
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-in-production")
+SECRET_KEY = os.getenv("SECRET_KEY", "")
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost").split(",")
 
 # Application definition
@@ -34,11 +34,15 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'dj_rest_auth',
+    'django.contrib.sites',
     'allauth',
     'allauth.account',
     'allauth.socialaccount',
     'rest_framework.authtoken',
+    'app',
+    'User',
 ]
+SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -48,8 +52,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-
+    'allauth.account.middleware.AccountMiddleware',  # This must be included
 ]
+
+
 
 ROOT_URLCONF = 'Contenter.urls'
 
@@ -170,4 +176,4 @@ DJANGO_ALLAUTH = {
 
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
-
+AUTH_USER_MODEL = 'User.User'

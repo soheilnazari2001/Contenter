@@ -15,14 +15,14 @@ class BaseContentModel(models.Model):
 
 class Content(BaseContentModel):
     author = models.ForeignKey(
-        'User',
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='contents'
     )
     title = models.CharField(max_length=255, null=False)
     content = models.TextField()
-    score_count_key = 'score_count:{}'  # Cache key for score count
-    score_sum_key = 'score_sum:{}'  # Cache key for score sum
+    score_count_key = 'score_count:{}'
+    score_sum_key = 'score_sum:{}'
 
     def update_score(self, new_score):
         redis_count_key = self.score_count_key.format(self.pk)

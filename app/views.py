@@ -1,94 +1,101 @@
-from django.shortcuts import get_object_or_404
-from django.http import JsonResponse
-from rest_framework.decorators import api_view
-from rest_framework import status
 import json
-
+from django.db.models import Prefetch
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, views, status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from .models import Content, Score
 from .serializers import ContentSerializer, ScoreSerializer
+from django.core.cache import cache
 from .kafka_producer import produce_message
 
 
-@api_view(['POST'])
-def create_content(request):
-    try:
-        data = json.loads(request.body)
-        serializer = ContentSerializer(data=data)
+class ContentCreateView(generics.CreateAPIView):
+    queryset = Content.objects.all()
+    serializer_class = ContentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+
+class ContentListView(generics.ListAPIView):
+    queryset = Content.objects.order_by('-created_at').all()
+    serializer_class = ContentSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = PageNumberPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        page = self.paginate_queryset(self.queryset)
+
+        if page is None:
+            return self.queryset
+
+        prefetch_scores_ids = []
+        cached_contents = []
+
+        for content in page:
+            redis_key = f"score:{user.id}:{content.id}"
+            score = cache.get(redis_key)
+            if score is not None:
+                content.user_score = [Score(user=user, content=content, score=int(score))]
+                cached_contents.append(content)
+            else:
+                prefetch_scores_ids.append(content.id)
+
+        if prefetch_scores_ids:
+            user_scores = Score.objects.filter(user=user, content_id__in=prefetch_scores_ids)
+            uncached_contents = Content.objects.filter(id__in=prefetch_scores_ids).prefetch_related(
+                Prefetch(
+                    'scores',
+                    queryset=user_scores,
+                    to_attr='user_score'
+                )
+            )
+            contents = cached_contents + list(uncached_contents)
+        else:
+            contents = cached_contents
+
+        for content in contents:
+            if hasattr(content, 'user_score') and content.user_score:
+                content.user_score = content.user_score[0]
+
+        return contents
+
+
+class RateContentView(views.APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ScoreSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            content = serializer.save()
+            data = serializer.validated_data
+            content_id = data['content'].id
+            redis_key = f"score:{request.user.id}:{content_id}"
+            cached_score = cache.get(redis_key)
 
-            # Prepare Kafka message
-            kafka_message = json.dumps({
-                'id': content.id,
-                'title': content.title,
-                'body': content.body,
-                'created_at': content.created_at.isoformat()
-            })
+            if cached_score and int(cached_score) == data['score']:
+                return Response(
+                    {"message": "Content is already rated!"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-            # Produce message to Kafka
+            cache.set(redis_key, data['score'], timeout=3600)
+
+            message = {
+                'user_id': request.user.id,
+                'content_id': content_id,
+                'score': data['score']
+            }
+
             produce_message(
-                topic="content-updates",
-                key=str(content.id),
-                value=kafka_message
+                topic="content-ratings",
+                key=str(request.user.id),
+                value=json.dumps(message)
             )
 
-            return JsonResponse(serializer.data, status=status.HTTP_201_CREATED)
-        else:
-            return JsonResponse(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(status=status.HTTP_202_ACCEPTED)
 
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['POST'])
-def create_score(request):
-    """
-    API endpoint to create a score and publish it to Kafka.
-    """
-    try:
-        data = json.loads(request.body)
-        serializer = ScoreSerializer(data=data)
-        if serializer.is_valid():
-            score = serializer.save()
-
-            # Prepare Kafka message
-            kafka_message = json.dumps({
-                'id': score.id,
-                'value': score.value,
-                'content_id': score.content.id,
-                'created_at': score.created_at.isoformat()
-            })
-
-            # Produce message to Kafka
-            produce_message(
-                topic="score-updates",
-                key=str(score.id),
-                value=kafka_message
-            )
-
-            return JsonResponse(serializer.data, status=status.HTTP_201_CREATED)
-        else:
-            return JsonResponse(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-def get_content(request, content_id):
-    try:
-        content = get_object_or_404(Content, id=content_id, is_deleted=False)
-        serializer = ContentSerializer(content)
-        return JsonResponse(serializer.data, status=status.HTTP_200_OK)
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-def list_scores(request, content_id):
-    try:
-        scores = Score.objects.filter(content_id=content_id)
-        serializer = ScoreSerializer(scores, many=True)
-        return JsonResponse(serializer.data, safe=False, status=status.HTTP_200_OK)
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
