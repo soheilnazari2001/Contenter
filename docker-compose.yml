@@ -4,6 +4,7 @@ services:
     build: .
     command: >
       sh -c "
+        python manage.py wait_for_db &&
         python manage.py makemigrations &&
         python manage.py migrate &&
         python manage.py runserver 0.0.0.0:8000
@@ -22,12 +23,16 @@ services:
       - DJANGO_SETTINGS_MODULE=Contenter.settings
       - DATABASE_URL=postgres://postgres:postgres@db:5432/content_db
       - REDIS_URL=redis://redis:6379/0
-      - KAFKA_BOOTSTRAP_SERVERS=kafka1:9093,kafka2:9093,kafka3:9093  # Add all brokers here
+      - KAFKA_BOOTSTRAP_SERVERS=kafka1:9093,kafka2:9093,kafka3:9093
       - KAFKA_GROUP_ID=score-group
       - KAFKA_TOPIC=score-topic
     networks:
       - backend
-
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # PostgreSQL Service
   db:
@@ -40,76 +45,75 @@ services:
       POSTGRES_PASSWORD: postgres
     networks:
       - backend
-
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # Redis Service
   redis:
     image: redis:6
     networks:
       - backend
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Kafka Service
-    # Kafka Broker 1
+  # Kafka Broker 1
   kafka1:
     image: wurstmeister/kafka:latest
     environment:
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka1:9093
-      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL: PLAINTEXT
-      KAFKA_LISTENER_NAME_INSIDE: INSIDE
-      KAFKA_LISTENER_PORT: 9093
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_BROKER_ID: 1
-      KAFKA_LISTENER_NAME_OUTSIDE: OUTSIDE
       KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka1:9093,OUTSIDE://localhost:9092
-    expose:
-      - "9093"
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE  # Add this line
+      KAFKA_BROKER_ID: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
     networks:
       - backend
 
-  # Kafka Broker 2
   kafka2:
     image: wurstmeister/kafka:latest
     environment:
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka2:9093
-      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL: PLAINTEXT
-      KAFKA_LISTENER_NAME_INSIDE: INSIDE
-      KAFKA_LISTENER_PORT: 9093
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka2:9093,OUTSIDE://localhost:9094
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE  # Add this line
       KAFKA_BROKER_ID: 2
-      KAFKA_LISTENER_NAME_OUTSIDE: OUTSIDE
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka2:9093,OUTSIDE://localhost:9092
-    expose:
-      - "9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
     networks:
       - backend
 
-  # Kafka Broker 3
+
   kafka3:
     image: wurstmeister/kafka:latest
     environment:
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka3:9093
-      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL: PLAINTEXT
-      KAFKA_LISTENER_NAME_INSIDE: INSIDE
-      KAFKA_LISTENER_PORT: 9093
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka3:9093,OUTSIDE://localhost:9095
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE  # Add this line
       KAFKA_BROKER_ID: 3
-      KAFKA_LISTENER_NAME_OUTSIDE: OUTSIDE
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka3:9093,OUTSIDE://localhost:9092
-    expose:
-      - "9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
     networks:
       - backend
+
+
 
   # Zookeeper Service (Required for Kafka)
   zookeeper:
     image: wurstmeister/zookeeper:latest
-    environment:
-      ZOOKEEPER_SERVER_ID: 1
-      ZOOKEEPER_LISTENERS: 'CLIENT:2181'
-      ZOOKEEPER_LISTENER_PORT: 2181
     networks:
       - backend
 

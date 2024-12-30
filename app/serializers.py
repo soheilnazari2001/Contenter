@@ -1,46 +1,51 @@
-# serializers.py
 from rest_framework import serializers
 from .models import Content, Score
-from django.core.exceptions import ValidationError
+
+
+class CreateContentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Content
+        fields = ["title", "content"]
+
+    def create(self, validated_data):
+        validated_data['author'] = self.context['request'].user
+        return super().create(validated_data)
 
 
 class ContentSerializer(serializers.ModelSerializer):
-    average_score = serializers.FloatField(read_only=True)
-    number_of_scores = serializers.IntegerField(read_only=True)
+    author_name = serializers.CharField(source='author.username', read_only=True)
+    is_rated = serializers.SerializerMethodField()
+    user_rating = serializers.SerializerMethodField()
+    average_rating = serializers.SerializerMethodField()
+    number_of_ratings = serializers.SerializerMethodField()
 
     class Meta:
         model = Content
-        fields = ['id', 'title', 'content', 'author', 'average_score', 'number_of_scores']
+        fields = [
+            'id', 'title', 'content',
+            'created_at', 'updated_at', 'author_name',
+            'number_of_ratings', 'average_rating', 'user_rating',
+            'is_rated',
+        ]
 
-    def validate_title(self, value):
-        if len(value) < 3:
-            raise ValidationError("Title should be at least 3 characters long.")
-        return value
+    def get_is_rated(self, obj):
+        request = self.context.get('request')
+        if request and hasattr(obj, 'user_rating'):
+            return obj.user_rating is not None
+        return False
 
-    def create(self, validated_data):
-        content = Content.objects.create(**validated_data)
-        return content
+    def get_user_rating(self, obj):
+        if hasattr(obj, 'user_rating') and obj.user_rating:
+            return obj.user_rating.score
+        return None
 
-    def update(self, instance, validated_data):
-        instance.title = validated_data.get('title', instance.title)
-        instance.content = validated_data.get('content', instance.content)
-        instance.save()
-        return instance
+    def get_average_rating(self, obj):
+        return obj.get_average_score()
+
+    def get_number_of_ratings(self, obj):
+        return Score.objects.filter(content=obj).count()
 
 
-class ScoreSerializer(serializers.ModelSerializer):
-    user = serializers.StringRelatedField()
-    content = serializers.StringRelatedField()
-
-    class Meta:
-        model = Score
-        fields = ['id', 'score', 'user', 'content']
-
-    def create(self, validated_data):
-        score = Score.objects.create(**validated_data)
-        return score
-
-    def update(self, instance, validated_data):
-        instance.score = validated_data.get('score', instance.score)
-        instance.save()
-        return instance
+class ScoreSerializer(serializers.Serializer):
+    content_id = serializers.IntegerField()
+    score = serializers.IntegerField(min_value=1, max_value=5)

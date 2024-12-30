@@ -16,17 +16,13 @@ from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-__kpngy$!$)w@9e=)o-34rrgbi-eiy(zb_j78&6ids)65l41dr'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
+DEBUG = os.getenv("DEBUG", "False") == "True"
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost").split(",")
 
 # Application definition
 
@@ -38,11 +34,15 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'dj_rest_auth',
+    'django.contrib.sites',
     'allauth',
     'allauth.account',
     'allauth.socialaccount',
     'rest_framework.authtoken',
+    'app',
+    'User',
 ]
+SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -52,8 +52,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-
+    'allauth.account.middleware.AccountMiddleware',  # This must be included
 ]
+
+
 
 ROOT_URLCONF = 'Contenter.urls'
 
@@ -81,8 +83,12 @@ WSGI_APPLICATION = 'Contenter.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv("DB_NAME", "content_db"),
+        'USER': os.getenv("DB_USER", "postgres"),
+        'PASSWORD': os.getenv("DB_PASSWORD", "postgres"),
+        'HOST': os.getenv("DB_HOST", "db"),
+        'PORT': os.getenv("DB_PORT", "5432"),
     }
 }
 
@@ -130,18 +136,9 @@ KAFKA_URL = os.getenv('KAFKA_URL', 'localhost:9092')
 
 from kafka import KafkaProducer
 
-while True:
-    try:
-        KAFKA_GROUP_ID = 'score-group'
-        KAFKA_TOPIC = 'score-topic'
-        producer = KafkaProducer(
-            bootstrap_servers=KAFKA_URL,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
-        )
-        break
-    except Exception as e:
-        print(f"Kafka not ready, retrying in 5 seconds: {e}")
-        time.sleep(5)
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka1:9093,kafka2:9093,kafka3:9093").split(",")
+KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "default-group")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "default-topic")
 
 # Redis configuration
 REDIS_URL = os.getenv('REDIS_URL', 'localhost:6379')
@@ -153,13 +150,12 @@ redis_client = redis.StrictRedis.from_url(REDIS_URL)
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://127.0.0.1:6379/1',
+        'LOCATION': os.getenv("REDIS_URL", "redis://redis:6379/0"),
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-        },
+        }
     }
 }
-
 AUTHENTICATION_BACKENDS = (
     'allauth.account.auth_backends.AuthenticationBackend',
     'django.contrib.auth.backends.ModelBackend',
@@ -177,3 +173,7 @@ DJANGO_ALLAUTH = {
     'ACCOUNT_EMAIL_VERIFICATION': 'mandatory',  # or 'optional'
     'ACCOUNT_AUTHENTICATED_REDIRECT_URL': '/',  # where to redirect after login
 }
+
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_CACHE_ALIAS = "default"
+AUTH_USER_MODEL = 'User.User'

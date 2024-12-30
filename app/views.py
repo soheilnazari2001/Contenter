@@ -1,124 +1,101 @@
-from django.shortcuts import render, get_object_or_404
-from django.http import JsonResponse
-from rest_framework import status, generics, viewsets
-from rest_framework.decorators import api_view, action
+import json
+from django.db.models import Prefetch
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, views, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-
+from rest_framework.pagination import PageNumberPagination
 from .models import Content, Score
-from .pagination import StandardResultsSetPagination
 from .serializers import ContentSerializer, ScoreSerializer
-from .tasks import process_score
-import redis
-
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+from django.core.cache import cache
+from .kafka_producer import produce_message
 
 
-class ContentViewSet(viewsets.ReadOnlyModelViewSet):
+class ContentCreateView(generics.CreateAPIView):
     queryset = Content.objects.all()
     serializer_class = ContentSerializer
-    permission_classes = [IsAuthenticated]  # Add this if you want authentication
+    permission_classes = [IsAuthenticated]
 
-    @action(detail=True, methods=['GET'])
-    def get_average_score(self, request, pk=None):
-        content = self.get_object()
-        cache_key = f'content:{content.id}:average_score'
-        cached_score = redis_client.get(cache_key)
-
-        if cached_score:
-            content.average_score = float(cached_score)
-
-        serializer = self.get_serializer(content)
-        return Response(serializer.data)
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
 
 
 class ContentListView(generics.ListAPIView):
-    queryset = Content.objects.all()
+    queryset = Content.objects.order_by('-created_at').all()
     serializer_class = ContentSerializer
-    pagination_class = StandardResultsSetPagination
+    permission_classes = [IsAuthenticated]
+    pagination_class = PageNumberPagination
 
     def get_queryset(self):
-        queryset = Content.objects.all()
-        title = self.request.query_params.get('title', None)
-        if title:
-            queryset = queryset.filter(title__icontains=title)
+        user = self.request.user
+        page = self.paginate_queryset(self.queryset)
 
-        return queryset
+        if page is None:
+            return self.queryset
 
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        for content in queryset:
-            average_score = redis_client.get(f'content:{content.id}:average_score')
+        prefetch_scores_ids = []
+        cached_contents = []
 
-            if not average_score:
-                average_score = content.average_score
-                redis_client.set(f'content:{content.id}:average_score', average_score)
+        for content in page:
+            redis_key = f"score:{user.id}:{content.id}"
+            score = cache.get(redis_key)
+            if score is not None:
+                content.user_score = [Score(user=user, content=content, score=int(score))]
+                cached_contents.append(content)
+            else:
+                prefetch_scores_ids.append(content.id)
 
-            content.average_score = average_score
-        response = super().list(request, *args, **kwargs)
-        for idx, data in enumerate(response.data['results']):
-            content = queryset[idx]
-            data['average_score'] = content.average_score
+        if prefetch_scores_ids:
+            user_scores = Score.objects.filter(user=user, content_id__in=prefetch_scores_ids)
+            uncached_contents = Content.objects.filter(id__in=prefetch_scores_ids).prefetch_related(
+                Prefetch(
+                    'scores',
+                    queryset=user_scores,
+                    to_attr='user_score'
+                )
+            )
+            contents = cached_contents + list(uncached_contents)
+        else:
+            contents = cached_contents
 
-        return response
+        for content in contents:
+            if hasattr(content, 'user_score') and content.user_score:
+                content.user_score = content.user_score[0]
+
+        return contents
 
 
-class ScoreViewSet(viewsets.ModelViewSet):
-    queryset = Score.objects.all()
-    serializer_class = ScoreSerializer
-    permission_classes = [IsAuthenticated]  # Add this if you want authentication
+class RateContentView(views.APIView):
+    permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        content_id = self.kwargs.get('content_id')
-        return Score.objects.filter(content_id=content_id)
+    def post(self, request):
+        serializer = ScoreSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            data = serializer.validated_data
+            content_id = data['content'].id
+            redis_key = f"score:{request.user.id}:{content_id}"
+            cached_score = cache.get(redis_key)
 
-    def perform_create(self, serializer):
-        content_id = self.kwargs.get('content_id')
-        content = Content.objects.get(id=content_id)
-        score = serializer.validated_data['score']
-        # Create score and handle score processing
-        score_instance = serializer.save(content=content, user=self.request.user)
-        process_score(content_id, score, created=True)
+            if cached_score and int(cached_score) == data['score']:
+                return Response(
+                    {"message": "Content is already rated!"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-    def perform_update(self, serializer):
-        score_instance = serializer.instance
-        new_score = serializer.validated_data['score']
-        old_score = score_instance.score
-        score_instance.save()
-        process_score(score_instance.content.id, new_score, created=False)
+            cache.set(redis_key, data['score'], timeout=3600)
 
-    @action(detail=True, methods=['GET'])
-    def get_scores(self, request, content_id=None):
-        content = Content.objects.get(id=content_id)
-        scores = Score.objects.filter(content=content)
-        serializer = ScoreSerializer(scores, many=True)
-        return Response(serializer.data)
+            message = {
+                'user_id': request.user.id,
+                'content_id': content_id,
+                'score': data['score']
+            }
 
-    @action(detail=True, methods=['POST'])
-    def create_score(self, request, content_id=None):
-        content = Content.objects.get(id=content_id)
-        score = request.data.get('score')
+            produce_message(
+                topic="content-ratings",
+                key=str(request.user.id),
+                value=json.dumps(message)
+            )
 
-        if score is None or not (1 <= score <= 5):
-            return Response({"error": "Score must be between 1 and 5."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(status=status.HTTP_202_ACCEPTED)
 
-        # Create the score and return it
-        score_instance = Score.objects.create(content=content, user=request.user, score=score)
-        process_score(content_id, score, created=True)
-        score_serializer = ScoreSerializer(score_instance)
-        return Response(score_serializer.data, status=status.HTTP_201_CREATED)
-
-    @action(detail=True, methods=['PUT'])
-    def update_score(self, request, content_id=None, score_id=None):
-        content = Content.objects.get(id=content_id)
-        score_instance = Score.objects.get(id=score_id, content=content, user=request.user)
-        new_score = request.data.get('score')
-
-        if new_score is None or not (0 <= new_score <= 5):
-            return Response({"error": "Score must be between 0 and 5."}, status=status.HTTP_400_BAD_REQUEST)
-
-        score_instance.score = new_score
-        score_instance.save()
-        process_score(content_id, new_score, created=False)
-        score_serializer = ScoreSerializer(score_instance)
-        return Response(score_serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
